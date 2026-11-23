@@ -1,0 +1,318 @@
+name: inji-workshop
+
+services:
+  esignet-db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./sql/esignet-java-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./sql/mock-identities.sql:/docker-entrypoint-initdb.d/zz-mock-identities.sql:ro
+      - esignet-java-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  sync-identities:
+    image: postgres:17-bookworm
+    profiles: [maintenance]
+    environment:
+      PGHOST: esignet-db
+      PGPASSWORD: postgres
+    entrypoint: ["/bin/sh", "-c", "sed 's/\r$//' /scripts/sync-identities.sh | /bin/sh"]
+    volumes:
+      - ./scripts/sync-identities.sh:/scripts/sync-identities.sh:ro
+      - ./sql/mock-identities.sql:/inputs/mock-identities.sql:ro
+      - ./config/workshop_identity_data.csv:/inputs/workshop_identity_data.csv:ro
+    depends_on:
+      esignet-db:
+        condition: service_healthy
+
+  mock-identity:
+    image: mosipid/mock-identity-system:0.13.0
+    user: root
+    environment:
+      container_user: mosip
+      active_profile_env: default,local
+      SPRING_DATASOURCE_URL: jdbc:postgresql://esignet-db:5432/mosip_mockidentitysystem?currentSchema=mockidentitysystem
+      SPRING_DATASOURCE_USERNAME: postgres
+      SPRING_DATASOURCE_PASSWORD: postgres
+      MOSIP_ESIGNET_HOST: ${WORKSHOP_HOST:?Preencha WORKSHOP_HOST no .env}:31080
+      # Apenas para identidades fictícias: o Certify CSV 0.14.0 busca pelo sub=id.
+      MOSIP_MOCK_IDA_KYC_PSUT_FIELD: individualId
+      MOSIP_KERNEL_KEYMANAGER_HSM_CONFIG_PATH: /home/mosip/keys/mock_local.p12
+    ports:
+      - "31082:8082"
+    volumes:
+      - mock-identity-keys:/home/mosip/keys
+    depends_on:
+      esignet-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8082/v1/mock-identity-system/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  esignet:
+    image: mosipid/esignet-with-plugins:1.8.0
+    user: root
+    environment:
+      container_user: mosip
+      active_profile_env: default,local
+      plugin_name_env: esignet-mock-plugin.jar
+      MOSIP_ESIGNET_DATABASE_URL: jdbc:postgresql://esignet-db:5432/mosip_esignet?currentSchema=esignet
+      MOSIP_ESIGNET_DATABASE_USERNAME: postgres
+      MOSIP_ESIGNET_DATABASE_PASSWORD: postgres
+      MOSIP_ESIGNET_MOCK_DOMAIN_URL: http://mock-identity:8082
+      MOSIP_ESIGNET_INTEGRATION_KEY_BINDER: MockKeyBindingWrapperService
+      MOSIP_ESIGNET_DOMAIN_URL: http://${WORKSHOP_HOST}:31080
+      MOSIP_KERNEL_KEYMANAGER_HSM_CONFIG_PATH: /home/mosip/keys/esignet_local.p12
+      MOSIP_ESIGNET_SUPPORTED_CREDENTIAL_SCOPES: "{'mock_identity_vc_ldp'}"
+      MOSIP_ESIGNET_CREDENTIAL_SCOPE_RESOURCE_MAPPING: "{'mock_identity_vc_ldp':'http://${WORKSHOP_HOST}:31080/v1/esignet/vci/credential'}"
+      SPRING_CACHE_TYPE: redis
+      SPRING_DATA_REDIS_HOST: redis
+      KAFKA_ENABLED: "false"
+      SPRING_AUTOCONFIGURE_EXCLUDE: org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+    volumes:
+      - esignet-keys:/home/mosip/keys
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8088/v1/esignet/actuator/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    depends_on:
+      esignet-db:
+        condition: service_healthy
+      mock-identity:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  esignet-public:
+    image: nginx:stable
+    ports:
+      - "31080:80"
+    volumes:
+      - ./config/esignet-public-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      esignet:
+        condition: service_healthy
+
+  redis:
+    image: redis:6.0
+
+  esignet-ui:
+    image: mosipid/oidc-ui:1.8.0
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cd /home/mosip
+        if [ -f /usr/share/nginx/html/plugins/sign-in-button-plugin.js ]; then
+          exec nginx -g 'daemon off;'
+        fi
+        exec sh configure_start.sh nginx -g 'daemon off;'
+    ports:
+      - "31000:3000"
+    volumes:
+      - ./config/esignet-nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      esignet:
+        condition: service_healthy
+
+  extract-client:
+    image: injistack/inji-certify-with-plugins:0.14.0
+    user: root
+    entrypoint: ["/bin/sh", "/scripts/extract-client.sh"]
+    environment:
+      WORKSHOP_KEYSTORE_PASSWORD: ${WORKSHOP_KEYSTORE_PASSWORD:-xy4gh6swa2i}
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./assets:/assets:ro
+      - mimoto-keys:/workshop
+  setup-client:
+    image: node:22-alpine
+    entrypoint: ["node", "/scripts/setup-client.mjs"]
+    environment:
+      WORKSHOP_HOST: ${WORKSHOP_HOST}
+      WORKSHOP_CLIENT_ID: ${WORKSHOP_CLIENT_ID:-wallet-demo}
+    volumes:
+      - ./scripts:/scripts:ro
+      - mimoto-keys:/workshop
+    depends_on:
+      esignet:
+        condition: service_healthy
+      extract-client:
+        condition: service_completed_successfully
+
+  certify-db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./sql/certify_init.sql:/docker-entrypoint-initdb.d/certify_init.sql:ro
+      - ./sql/mimoto_init.sql:/docker-entrypoint-initdb.d/mimoto_init.sql:ro
+      - ./sql/eca-demo.sql:/docker-entrypoint-initdb.d/zz-eca-demo.sql:ro
+      - certify-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  sync-credentials:
+    image: postgres:15
+    profiles: [maintenance]
+    environment:
+      PGHOST: certify-db
+      PGPASSWORD: postgres
+    entrypoint: ["/bin/sh", "-c", "sed 's/\r$//' /scripts/sync-credentials.sh | /bin/sh"]
+    volumes:
+      - ./scripts/sync-credentials.sh:/scripts/sync-credentials.sh:ro
+      - ./sql/credentials:/credentials:ro
+    depends_on:
+      certify-db:
+        condition: service_healthy
+
+  certify:
+    image: injistack/inji-certify-with-plugins:0.14.0
+    user: root
+    entrypoint: ["/bin/sh", "/home/inji/workshop-certify-start.sh"]
+    environment:
+      container_user: mosip
+      active_profile_env: default, csvdp-farmer
+      SPRING_CONFIG_NAME: certify
+      SPRING_CONFIG_LOCATION: /home/mosip/config/
+      enable_certify_artifactory: "false"
+      download_hsm_client: "false"
+      mosip_certify_domain_url: http://${WORKSHOP_HOST}:31090
+      WORKSHOP_HOST: ${WORKSHOP_HOST}
+    ports:
+      - "31090:8090"
+    volumes:
+      - ./config/certify-default.properties:/home/mosip/config/certify-default.properties:ro
+      - ./config/certify-csvdp-farmer.properties:/home/mosip/config/certify-csvdp-farmer.properties:ro
+      - ./config/workshop_identity_data.csv:/home/mosip/config/workshop_identity_data.csv:ro
+      - ./config/vp_request_config.json:/home/mosip/config/vp_request_config.json:ro
+      - ./scripts/workshop-certify-start.sh:/home/inji/workshop-certify-start.sh:ro
+      - ./local-ca:/home/inji/workshop-ca:ro
+      - certify-keys:/home/inji/CERTIFY_PKCS12
+    depends_on:
+      certify-db:
+        condition: service_healthy
+      setup-client:
+        condition: service_completed_successfully
+
+  certify-nginx:
+    image: nginx:stable
+    entrypoint: ["/bin/sh", "-c", "sed 's/\r$//' /scripts/workshop-certify-nginx-start.sh | /bin/sh"]
+    ports:
+      - "31091:80"
+    volumes:
+      - ./config/certify-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./scripts/workshop-certify-nginx-start.sh:/scripts/workshop-certify-nginx-start.sh:ro
+      - workshop-did-tls:/etc/nginx/workshop-tls
+      - mimoto-keys:/config/server/workshop:ro
+      - ./config/mimoto-trusted-verifiers.json:/config/server/mimoto-trusted-verifiers.json:ro
+      - ./config/credential-template.html:/config/server/credential-template.html:ro
+      - ./config/vp_request_config.json:/config/server/vp_request_config.json:ro
+      - ./assets/mosip-cbeff.xsd:/config/server/mosip-cbeff.xsd:ro
+    depends_on:
+      - certify
+
+  mimoto:
+    image: injistack/mimoto:0.22.0
+    user: root
+    environment:
+      container_user: mosip
+      active_profile_env: default
+      SPRING_CONFIG_NAME: mimoto
+      SPRING_CONFIG_LOCATION: /home/mosip/
+      SPRING_CLOUD_BOOTSTRAP_LOCATION: /home/mosip/mimoto-bootstrap.properties
+      oidc_p12_password: ${WORKSHOP_KEYSTORE_PASSWORD:-xy4gh6swa2i}
+      WALLET_BINDING_PARTNER_API_KEY: dummywalletbindingpartnerapikey
+      SPRING_DATASOURCE_URL: jdbc:postgresql://certify-db:5432/inji_mimoto
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      GOOGLE_OAUTH_CLIENT_ID: clientId
+      GOOGLE_OAUTH_CLIENT_SECRET: clientSecret
+      WORKSHOP_HOST: ${WORKSHOP_HOST}
+    ports:
+      - "31099:8099"
+    volumes:
+      - ./config/mimoto-default.properties:/home/mosip/mimoto-default.properties:ro
+      - ./config/mimoto-bootstrap.properties:/home/mosip/mimoto-bootstrap.properties:ro
+      - mimoto-keys:/home/mosip/workshop:ro
+      - ./config/mimoto-trusted-verifiers.json:/home/mosip/mimoto-trusted-verifiers.json:ro
+      - mimoto-keys:/home/mosip/certs
+    depends_on:
+      certify-db:
+        condition: service_healthy
+      setup-client:
+        condition: service_completed_successfully
+
+  verify-db-setup:
+    image: postgres:15
+    environment:
+      PGHOST: certify-db
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if ! psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'inji_verify'" | grep -q '^1$'; then
+          createdb inji_verify
+        fi
+        psql -v ON_ERROR_STOP=1 -d inji_verify -f /sql/verify_init.sql
+    volumes:
+      - ./sql/verify_init.sql:/sql/verify_init.sql:ro
+    depends_on:
+      certify-db:
+        condition: service_healthy
+
+  verify:
+    image: injistack/inji-verify-service:0.18.2
+    user: root
+    entrypoint: ["/bin/sh", "-c", "sed 's/\r$//' /home/inji/workshop-verify-start.sh | /bin/sh"]
+    environment:
+      active_profile_env: default
+      DATABASE_HOST: certify-db
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: inji_verify
+      DATABASE_SCHEMA: verify
+      DATABASE_USERNAME: postgres
+      DATABASE_PASSWORD: postgres
+      INJI_VP_SUBMISSION_BASE_URL: http://${WORKSHOP_HOST}:31180/v1/verify
+      INJI_DID_VERIFY_URI: did:web:${WORKSHOP_HOST}%3A31180:v1:verify
+      INJI_DID_VERIFY_PUBLIC_KEY_URI: did:web:${WORKSHOP_HOST}%3A31180:v1:verify#key-0
+      INJI_KEYSTORE_FILE_PASS: mosip
+      INJI_VERIFY_REDIRECT_URI: http://${WORKSHOP_HOST}:31180
+      INJI_VERIFY_COOKIE_SECURE_VALUE: "false"
+    ports:
+      - "31180:8080"
+    volumes:
+      - ./scripts/workshop-verify-start.sh:/home/inji/workshop-verify-start.sh:ro
+      - ./local-ca:/home/inji/workshop-ca:ro
+      - workshop-did-tls:/home/inji/workshop-did-tls:ro
+    depends_on:
+      verify-db-setup:
+        condition: service_completed_successfully
+      certify-nginx:
+        condition: service_started
+
+volumes:
+  esignet-java-db:
+  certify-db:
+  esignet-keys:
+  mock-identity-keys:
+  certify-keys:
+  mimoto-keys:
+  workshop-did-tls:
