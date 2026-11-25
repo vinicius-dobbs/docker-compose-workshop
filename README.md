@@ -15,7 +15,8 @@ identificador publicamente verificável.
 - Docker com Compose e cerca de 8 GB de RAM disponíveis; portas `31000`, `31080`,
   `31082`, `31090`, `31091`, `31099` e `31180` livres.
 - O app [Guarda](https://github.com/vinicius-dobbs/guarda-workshop) no branch
-  `workshop` e o app Breja.me devem estar disponíveis **separadamente** do Compose.
+  `workshop` e o app [Breja.me](https://github.com/vinicius-dobbs/app-verificador-workshop)
+  no branch `workshop` devem estar disponíveis **separadamente** do Compose.
   Cada app precisa das suas dependências instaladas e de um emulador Android.
 - Um IPv4 da máquina alcançável pelo host, pelos contêineres e pelo emulador.
   Use **o mesmo IP** nas configurações dos três projetos. Não coloque
@@ -24,6 +25,35 @@ identificador publicamente verificável.
 - Em rede com inspeção corporativa de HTTPS, coloque **somente a CA pública já
   confiável** da máquina em `local-ca/` (`.der`, `.crt` ou `.pem`) antes de subir.
   Certify e Verify importam a CA na JVM. Não desative a verificação TLS.
+
+### Preparar os apps Android (primeira vez)
+
+Faça isso **antes** de subir o Compose para não perder tempo durante a oficina.
+
+**Pré-requisitos:**
+- [Node.js](https://nodejs.org/) v18 ou superior
+- [Android Studio](https://developer.android.com/studio) com Android SDK instalado
+- CMake 4.x instalado pelo Android Studio: **SDK Manager → SDK Tools → CMake**
+- Emulador Android criado e rodando (API 24+)
+- Variável de ambiente `ANDROID_HOME` apontando para o SDK — o Android Studio
+  frequentemente não configura isso automaticamente no Windows; se necessário,
+  adicione manualmente: `C:\Users\<usuario>\AppData\Local\Android\Sdk`
+
+**Para cada app (Guarda e Breja.me), no branch `workshop`:**
+
+```bash
+npm install
+cp .env.example .env
+# edite o .env com o IP da máquina antes de continuar
+npm run android
+```
+
+O `npm run android` aciona o `expo prebuild` automaticamente na primeira vez,
+gera a pasta `android/` e compila o app. Isso pode levar alguns minutos.
+
+**No Windows:** coloque o projeto em um path curto (ex: `C:\workshop-test\guarda-workshop`)
+para evitar problemas com o limite de 260 caracteres no build C++. O CMake 4.x
+instalado acima resolve esse problema independentemente do path.
 
 ## 1. Preparar e subir os serviços
 

@@ -23,6 +23,16 @@
   emulador e contêineres. A mesma origem deve aparecer nos `.env` **locais**
   do Guarda e Breja.me. Não substituir por `localhost` ou `10.0.2.2` apenas
   em um ponto: issuer OAuth, audience, redirects e `request_uri` dependem dela.
+- Os apps Guarda e Breja.me usam React Native com Expo e build nativo Android.
+  A pasta `android/` não é versionada — é gerada pelo `expo prebuild` no
+  primeiro `npm run android`. Requer Android Studio com CMake 4.x instalado
+  (SDK Manager → SDK Tools → CMake) e variável `ANDROID_HOME` configurada.
+  No Windows, o Android Studio frequentemente não define `ANDROID_HOME`
+  automaticamente; sem ela o prebuild não gera o `local.properties` e o build
+  falha com `SDK location not found`. O CMake 4.x é necessário para evitar
+  falhas de path longo (`Filename longer than 260 characters`) no build C++
+  em Windows — o Breja.me já inclui um plugin Expo que força o CMake 4.x
+  automaticamente a cada prebuild.
 
 ## Inventário que não deve ser confundido
 
